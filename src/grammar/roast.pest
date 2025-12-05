@@ -1,0 +1,83 @@
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+
+program = { SOI ~ statement* ~ EOI }
+
+statement = {
+    let_statement
+    | assignment_statement
+    | function_declaration
+    | return_statement
+    | expression_statement
+}
+
+// Variable declarations
+let_statement = { "let" ~ mutability? ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expression ~ ";" }
+
+mutability = { "mut" }
+
+assignment_statement = { identifier ~ "=" ~ expression ~ ";" }
+
+return_statement = { "return" ~ expression? ~ ";" }
+
+// Function declarations
+function_declaration = {
+    "fn" ~ identifier ~ "(" ~ parameter_list? ~ ")" ~ return_type? ~ block
+}
+
+parameter_list = { parameter ~ ("," ~ parameter)* }
+
+parameter = { identifier ~ ":" ~ type_annotation }
+
+return_type = { "->" ~ type_annotation }
+
+block = { "{" ~ statement* ~ return_expression? ~ "}" }
+
+return_expression = { expression }
+
+expression_statement = { expression ~ ";" }
+
+// Expressions
+expression = { comparison }
+
+comparison = { additive ~ (comparison_op ~ additive)* }
+
+comparison_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+
+additive = { multiplicative ~ (additive_op ~ multiplicative)* }
+
+additive_op = { "+" | "-" }
+
+multiplicative = { unary ~ (multiplicative_op ~ unary)* }
+
+multiplicative_op = { "*" | "/" | "%" }
+
+unary = { unary_op? ~ primary }
+
+unary_op = { "-" | "!" }
+
+primary = {
+    function_call
+    | identifier
+    | integer_literal
+    | float_literal
+    | boolean_literal
+    | string_literal
+    | "(" ~ expression ~ ")"
+}
+
+function_call = { identifier ~ "(" ~ argument_list? ~ ")" }
+
+argument_list = { expression ~ ("," ~ expression)* }
+
+// Literals and identifiers
+identifier = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+
+type_annotation = { "i32" | "i64" | "f32" | "f64" | "bool" | "String" | "str" }
+
+integer_literal = @{ ASCII_DIGIT+ }
+
+float_literal = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+
+boolean_literal = { "true" | "false" }
+
+string_literal = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
