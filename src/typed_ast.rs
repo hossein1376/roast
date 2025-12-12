@@ -109,7 +109,6 @@ pub struct SymbolTable {
 }
 
 pub struct Symbol {
-    pub name: String,
     pub symbol_type: Type,
     pub mutable: bool,
 }
@@ -162,54 +161,11 @@ impl SymbolTable {
             msg: format!("Undefined symbol '{}'", name),
         })
     }
-
-    /// Check if a symbol exists in the current scope only
-    pub fn exists_in_current_scope(&self, name: &str) -> bool {
-        self.scopes.last().unwrap().contains_key(name)
-    }
-
-    /// Update a symbol (for assignments)
-    pub fn update(&mut self, name: &str, new_type: Type) -> Result<(), TypeError> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(symbol) = scope.get_mut(name) {
-                if !symbol.mutable {
-                    return Err(TypeError {
-                        msg: format!("Cannot assign to immutable variable '{}'", name),
-                    });
-                }
-                symbol.symbol_type = new_type;
-                return Ok(());
-            }
-        }
-
-        Err(TypeError {
-            msg: format!("Undefined symbol '{}'", name),
-        })
-    }
-
-    /// Get the current scope depth (useful for debugging)
-    pub fn depth(&self) -> usize {
-        self.scopes.len()
-    }
 }
 
 #[derive(Debug)]
 pub struct TypeError {
     pub msg: String,
-}
-
-pub fn analyze_program(program: Program) -> Result<TypedProgram, TypeError> {
-    let mut symbols = SymbolTable::new();
-    let mut typed_statements = Vec::new();
-
-    for statement in program.statements {
-        let typed_stmt = analyse_statement(statement, &mut symbols)?;
-        typed_statements.push(typed_stmt);
-    }
-
-    Ok(TypedProgram {
-        statements: typed_statements,
-    })
 }
 
 #[derive(Debug)]
@@ -388,76 +344,6 @@ pub fn analyse_expression(
     }
 }
 
-fn analyse_function_declaration(
-    func_decl: Statement,
-    symbols: &mut SymbolTable,
-) -> Result<TypedStatement, TypeError> {
-    // Extract function details
-    let (name, parameters, return_type, body) = match func_decl {
-        Statement::FunctionDeclaration {
-            name,
-            parameters,
-            return_type,
-            body,
-        } => (name, parameters, return_type, body),
-        _ => unreachable!(),
-    };
-
-    // Build function type
-    let param_types: Vec<Type> = parameters
-        .iter()
-        .map(|p| parse_type(&p.type_annotation))
-        .collect();
-
-    let ret_type = return_type.map(|t| parse_type(&t)).unwrap_or(Type::Unit); // or however you handle void
-
-    let func_type = Type::Function {
-        param_types: param_types.clone(),
-        return_type: Box::new(ret_type.clone()),
-    };
-
-    // Add function to symbol table
-    symbols.insert(
-        name.clone(),
-        Symbol {
-            name: name.clone(),
-            symbol_type: func_type,
-            mutable: false,
-        },
-    )?;
-
-    // Create new scope for function body
-    symbols.push_scope();
-
-    // Add parameters to scope
-    for param in &parameters {
-        symbols.insert(
-            param.name.clone(),
-            Symbol {
-                name: param.name.clone(),
-                symbol_type: parse_type(&param.type_annotation),
-                mutable: false,
-            },
-        )?;
-    }
-
-    // Analyze body
-    let typed_body = analyse_block(body, symbols)?;
-
-    // Validate all return paths
-    validate_function_returns(&name, &ret_type, &typed_body)?;
-
-    // Pop function scope
-    symbols.pop_scope();
-
-    Ok(TypedStatement::FunctionDeclaration {
-        name,
-        parameters,
-        return_type: ret_type,
-        body: typed_body,
-    })
-}
-
 fn parse_type(type_str: &str) -> Type {
     match type_str {
         "i32" => Type::I32,
@@ -530,7 +416,6 @@ fn analyse_statement(
             symbols.insert(
                 name.clone(),
                 Symbol {
-                    name: name.clone(),
                     symbol_type: inferred_type.clone(),
                     mutable,
                 },
@@ -600,7 +485,6 @@ fn analyse_statement(
             symbols.insert(
                 name.clone(),
                 Symbol {
-                    name: name.clone(),
                     symbol_type: func_type,
                     mutable: false,
                 },
@@ -614,7 +498,6 @@ fn analyse_statement(
                 symbols.insert(
                     param.name.clone(),
                     Symbol {
-                        name: param.name.clone(),
                         symbol_type: parse_type(&param.type_annotation),
                         mutable: false,
                     },
@@ -663,84 +546,6 @@ fn analyse_statement(
             Ok(TypedStatement::Expression(typed_expr))
         }
     }
-}
-
-fn validate_function_returns(
-    func_name: &str,
-    expected_type: &Type,
-    block: &TypedBlock,
-) -> Result<(), TypeError> {
-    let has_return = block.return_expression.is_some()
-        || block
-            .statements
-            .iter()
-            .any(|s| matches!(s, TypedStatement::Return { .. }));
-
-    if !has_return && expected_type != &Type::Unit {
-        return Err(TypeError {
-            msg: format!(
-                "Function '{}' declared to return {:?}, but has no return expression",
-                func_name, expected_type
-            ),
-        });
-    }
-
-    // Check return expression type
-    if let Some(return_expr) = &block.return_expression {
-        if return_expr.get_type() != expected_type {
-            return Err(TypeError {
-                msg: format!(
-                    "Function '{}' return type mismatch: expected {:?}, got {:?}",
-                    func_name,
-                    expected_type,
-                    return_expr.get_type()
-                ),
-            });
-        }
-    }
-
-    // Check return statement types
-    for stmt in &block.statements {
-        if let TypedStatement::Return { value: Some(expr) } = stmt {
-            if expr.get_type() != expected_type {
-                return Err(TypeError {
-                    msg: format!(
-                        "Function '{}' return type mismatch: expected {:?}, got {:?}",
-                        func_name,
-                        expected_type,
-                        expr.get_type()
-                    ),
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn collect_return_types(block: &TypedBlock) -> Vec<Type> {
-    let mut types = Vec::new();
-
-    // Check final return expression
-    if let Some(return_expr) = &block.return_expression {
-        types.push(return_expr.get_type().clone());
-    }
-
-    // Check all statements for early returns
-    for stmt in &block.statements {
-        match stmt {
-            TypedStatement::Return { value: Some(expr) } => {
-                types.push(expr.get_type().clone());
-            }
-            TypedStatement::Return { value: None } => {
-                types.push(Type::Unit);
-            }
-            // Could recurse into nested blocks here if needed
-            _ => {}
-        }
-    }
-
-    types
 }
 
 fn analyse_expression_with_hint(
