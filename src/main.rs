@@ -9,28 +9,410 @@ mod parser;
 mod typed_ast;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let source = r#"
-        let x = 5;
-        let y = 10;
+    use std::io::{self, Write};
 
-        fn add(a: i64, b: i64) -> i64 {
-            return a + b;
+    // REPL keeps a persistent type symbol table and runtime environment.
+    let mut repl = Repl::new();
+    let mut env = Environment::new();
+
+    println!("Roast REPL. Type ':help' for commands. Type ':exit' or 'exit' to leave.");
+
+    // We'll use crossterm to capture key events and handle editing (arrow keys, home/end/delete)
+    use crossterm::{
+        cursor::MoveToColumn,
+        event::{Event, KeyCode, KeyModifiers, poll, read},
+        execute,
+        terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
+    };
+    use std::time::Duration;
+
+    enable_raw_mode()?;
+
+    // Helper to print multi-line output safely by temporarily disabling raw mode.
+    // This clears the current line and moves the cursor to column 0 before printing
+    // so diagnostics (multi-line output with carets) don't accumulate indentation.
+    fn print_safe(s: &str) -> Result<(), Box<dyn Error>> {
+        // Disable raw mode so printed diagnostics behave normally.
+        disable_raw_mode()?;
+
+        // Move to start of current line and clear it to avoid growing indentation
+        execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+        println!("{}", s);
+        io::stdout().flush()?;
+
+        // Re-enable raw mode for continued interactive input.
+        enable_raw_mode()?;
+        Ok(())
+    }
+
+    // Helper: determine whether the current buffer is a complete program/statement.
+    // We'll consider the input complete if:
+    // - braces are balanced ({}), and
+    // - not inside an unclosed double-quote string, and
+    // - and (ends with ';' or ends with '}').
+    fn is_input_complete(s: &str) -> bool {
+        // Track braces and quotes. This is a heuristic sufficient for REPL convenience.
+        let mut brace_depth = 0i32;
+        let mut in_string = false;
+        let mut escape = false;
+
+        for ch in s.chars() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' && in_string {
+                escape = true;
+                continue;
+            }
+            if ch == '"' {
+                in_string = !in_string;
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            match ch {
+                '{' => brace_depth += 1,
+                '}' => brace_depth -= 1,
+                _ => {}
+            }
         }
 
-        let result = add(x, y);
-    "#;
+        if in_string {
+            return false;
+        }
+        if brace_depth > 0 {
+            return false;
+        }
 
-    // Parse
-    let program = parse_program(source)?;
+        let trimmed = s.trim_end();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let ends_with_semicolon = trimmed.ends_with(';');
+        let ends_with_close_brace = trimmed.ends_with('}');
 
-    // Type check
-    let typed_program = analyze_program(program).unwrap();
+        brace_depth == 0 && (ends_with_semicolon || ends_with_close_brace)
+    }
 
-    // Execute
-    execute_program(&typed_program)?;
+    // History: simple in-memory vector
+    let mut history: Vec<String> = Vec::new();
+    let mut history_pos: Option<usize> = None;
 
-    println!("Program executed successfully!");
+    loop {
+        // Line buffer and cursor position (in characters)
+        let mut buffer = String::new();
+        let mut cursor_pos: usize = 0;
+        let mut prompt = "> ".to_string();
 
+        // For multi-line inputs we will accumulate into `full_input`.
+        let mut full_input = String::new();
+
+        // Initial prompt: clear line and print prompt at column 0
+        execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+        print!("{}", prompt);
+        io::stdout().flush()?;
+
+        // Input loop: handle key events until Enter confirms a complete statement
+        loop {
+            // Wait for an event (timeout so program remains responsive)
+            if !poll(Duration::from_millis(100))? {
+                continue;
+            }
+
+            match read()? {
+                Event::Key(key_event) => {
+                    match key_event.code {
+                        // Ctrl-C: exit REPL
+                        KeyCode::Char('c')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            disable_raw_mode()?;
+                            println!();
+                            return Ok(());
+                        }
+
+                        KeyCode::Left => {
+                            if cursor_pos > 0 {
+                                cursor_pos -= 1;
+                            }
+                            // re-draw
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Right => {
+                            if cursor_pos < buffer.chars().count() {
+                                cursor_pos += 1;
+                            }
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Home => {
+                            cursor_pos = 0;
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::End => {
+                            cursor_pos = buffer.chars().count();
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Backspace => {
+                            if cursor_pos > 0 {
+                                // Remove character before cursor_pos
+                                let mut chars: Vec<char> = buffer.chars().collect();
+                                chars.remove(cursor_pos - 1);
+                                buffer = chars.iter().collect();
+                                cursor_pos -= 1;
+                            }
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Delete => {
+                            let len = buffer.chars().count();
+                            if cursor_pos < len {
+                                let mut chars: Vec<char> = buffer.chars().collect();
+                                chars.remove(cursor_pos);
+                                buffer = chars.iter().collect();
+                            }
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Up => {
+                            if history.is_empty() {
+                                // nothing
+                            } else {
+                                if let Some(pos) = history_pos {
+                                    if pos > 0 {
+                                        history_pos = Some(pos - 1);
+                                    }
+                                } else {
+                                    history_pos = Some(history.len() - 1);
+                                }
+                                if let Some(pos) = history_pos {
+                                    buffer = history[pos].clone();
+                                    cursor_pos = buffer.chars().count();
+                                }
+                            }
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Down => {
+                            if history.is_empty() {
+                                // nothing
+                            } else {
+                                if let Some(pos) = history_pos {
+                                    if pos + 1 < history.len() {
+                                        history_pos = Some(pos + 1);
+                                        buffer = history[history_pos.unwrap()].clone();
+                                    } else {
+                                        history_pos = None;
+                                        buffer.clear();
+                                    }
+                                }
+                                // if None do nothing
+                                cursor_pos = buffer.chars().count();
+                            }
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Char(ch) => {
+                            // Insert character at cursor position
+                            let mut chars: Vec<char> = buffer.chars().collect();
+                            chars.insert(cursor_pos, ch);
+                            buffer = chars.iter().collect();
+                            cursor_pos += 1;
+
+                            execute!(io::stdout(), Clear(ClearType::CurrentLine), MoveToColumn(0))?;
+                            print!("{}{}", prompt, buffer);
+                            let col = (prompt.len() + cursor_pos) as u16;
+                            execute!(io::stdout(), MoveToColumn(col))?;
+                            io::stdout().flush()?;
+                        }
+
+                        KeyCode::Enter => {
+                            // If current full_input + buffer is a complete program, finish and process.
+                            let candidate = if full_input.is_empty() {
+                                buffer.clone()
+                            } else {
+                                format!("{}\\n{}", full_input, buffer)
+                            };
+
+                            // If this is a REPL command (starts with ':'), treat it as complete immediately.
+                            if candidate.trim_start().starts_with(':') {
+                                full_input = candidate;
+                                println!();
+                                break;
+                            }
+
+                            if is_input_complete(&candidate) {
+                                // finalize
+                                full_input = candidate;
+                                println!();
+                                break;
+                            } else {
+                                // continue multi-line input
+                                full_input = candidate;
+                                // append newline to display and clear buffer for next line
+                                print!("\n");
+                                prompt = "... ".to_string();
+                                buffer.clear();
+                                cursor_pos = 0;
+                                history_pos = None;
+                                io::stdout().flush()?;
+                            }
+                        }
+
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Completed (multi-line) input is in full_input. If user never accumulated multi-line,
+        // full_input may be empty and buffer contains the single-line; handle accordingly.
+        let input_line = if full_input.is_empty() {
+            buffer.clone()
+        } else {
+            full_input.clone()
+        };
+        let trimmed = input_line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Commands start with ':' (also accept bare 'exit'/'quit')
+        if trimmed.starts_with(':') {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            match parts[0] {
+                ":exit" | ":quit" => break,
+                ":reset" => {
+                    repl.reset();
+                    env = Environment::new();
+                    print_safe("State cleared")?;
+                    continue;
+                }
+                ":env" => {
+                    print_safe(&format!("{:#?}", env))?;
+                    continue;
+                }
+                ":help" => {
+                    print_safe(
+                        "Commands: :help, :reset, :env, :history, :exit. Editing: arrows, Home, End, Delete.",
+                    )?;
+                    continue;
+                }
+                ":history" => {
+                    if history.is_empty() {
+                        print_safe("History is empty")?;
+                    } else {
+                        let mut out = String::new();
+                        for (i, entry) in history.iter().enumerate() {
+                            out.push_str(&format!("{}: {}\n", i, entry));
+                        }
+                        print_safe(&out)?;
+                    }
+                    continue;
+                }
+                _ => {
+                    print_safe(&format!("Unknown command: {}", parts[0]))?;
+                    continue;
+                }
+            }
+        }
+        if trimmed == "exit" || trimmed == "quit" {
+            break;
+        }
+
+        // Save to history (don't store duplicate consecutive identical entries)
+        if history.last().map_or(true, |last| last != &input_line) {
+            history.push(input_line.clone());
+        }
+        history_pos = None;
+
+        // If the input didn't end with a semicolon but looks like a standalone expression, add one
+        let program_str = if trimmed.ends_with(';')
+            || trimmed.starts_with("fn")
+            || trimmed.starts_with("let")
+            || trimmed.starts_with("return")
+        {
+            input_line.clone()
+        } else {
+            format!("{};", input_line)
+        };
+
+        match parse_program(&program_str) {
+            Ok(program) => {
+                match repl.feed_program(program) {
+                    Ok(typed_prog) => {
+                        // Execute typed statements using the persistent environment.
+                        for stmt in &typed_prog.statements {
+                            match exec_statement(stmt, &mut env) {
+                                Ok(Some(val)) => {
+                                    if let Err(err) = print_safe(&format!("{:?}", val)) {
+                                        eprintln!("Printing error: {}", err);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if let Err(err) = print_safe(&format!("Runtime error: {}", e)) {
+                                        eprintln!("Printing error: {}", err);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Err(err) = print_safe(&format!("Type error: {}", e.msg)) {
+                            eprintln!("Printing error: {}", err);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Err(err) = print_safe(&format!("Parse error: {}", e)) {
+                    eprintln!("Printing error: {}", err);
+                }
+            }
+        }
+    }
+
+    disable_raw_mode()?;
     Ok(())
 }
 
@@ -357,8 +739,9 @@ pub fn exec_statement(
         }
 
         TypedStatement::Expression(expr) => {
-            eval_expression(expr, env)?;
-            Ok(None)
+            // For expression statements return the evaluated value so the REPL can print it.
+            let v = eval_expression(expr, env)?;
+            Ok(Some(v))
         }
     }
 }

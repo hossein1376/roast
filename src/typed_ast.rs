@@ -570,3 +570,43 @@ fn analyse_expression_with_hint(
         _ => analyse_expression(expr, symbols),
     }
 }
+
+/// Lightweight REPL symbol table wrapper used by the interactive REPL.
+///
+/// This keeps a persistent `SymbolTable` across user inputs so declarations
+/// (variables, functions) remain available between evaluations.
+pub struct Repl {
+    pub symbols: SymbolTable,
+}
+
+impl Repl {
+    /// Create a new REPL with an empty global scope.
+    pub fn new() -> Self {
+        Repl {
+            symbols: SymbolTable::new(),
+        }
+    }
+
+    /// Analyze a full program (a sequence of statements), updating the REPL's symbol table.
+    ///
+    /// This uses the existing incremental `analyse_statement` implementation so the
+    /// symbol table is updated as each statement is processed.
+    pub fn feed_program(&mut self, program: Program) -> Result<TypedProgram, TypeError> {
+        let mut typed_statements = Vec::new();
+
+        for stmt in program.statements {
+            // Use the same incremental analysis so the symbol table persists between statements.
+            let typed = analyse_statement(stmt, &mut self.symbols)?;
+            typed_statements.push(typed);
+        }
+
+        Ok(TypedProgram {
+            statements: typed_statements,
+        })
+    }
+
+    /// Reset the REPL to an empty global scope.
+    pub fn reset(&mut self) {
+        self.symbols = SymbolTable::new();
+    }
+}
