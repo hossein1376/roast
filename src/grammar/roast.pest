@@ -11,13 +11,13 @@ statement = {
 }
 
 // Variable declarations
-let_statement = { "let" ~ mutability? ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expression ~ ";" }
+let_statement = { "let" ~ mutability? ~ identifier ~ (":" ~ type_annotation)? ~ "=" ~ expression ~ ";"? }
 
 mutability = { "mut" }
 
-assignment_statement = { identifier ~ "=" ~ expression ~ ";" }
+assignment_statement = { identifier ~ "=" ~ expression ~ ";"? }
 
-return_statement = { "return" ~ expression? ~ ";" }
+return_statement = { "return" ~ expression? ~ ";"? }
 
 // Function declarations
 function_declaration = {
@@ -34,7 +34,7 @@ block = { "{" ~ statement* ~ return_expression? ~ "}" }
 
 return_expression = { expression }
 
-expression_statement = { expression ~ ";" }
+expression_statement = { expression ~ ";"? }
 
 // Expressions
 expression = { comparison }
@@ -56,7 +56,7 @@ unary = { unary_op? ~ primary }
 unary_op = { "-" | "!" }
 
 primary = {
-    function_call
+  
   | identifier
   | float_literal
   | integer_literal

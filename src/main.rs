@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // We'll consider the input complete if:
     // - braces are balanced ({}), and
     // - not inside an unclosed double-quote string, and
-    // - and (ends with ';' or ends with '}').
+    // - the trimmed input is non-empty (semicolons are optional).
     fn is_input_complete(s: &str) -> bool {
         // Track braces and quotes. This is a heuristic sufficient for REPL convenience.
         let mut brace_depth = 0i32;
@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if in_string {
             return false;
         }
+        // If braces are still unbalanced (more opens than closes), it's not complete.
         if brace_depth > 0 {
             return false;
         }
@@ -90,10 +91,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         if trimmed.is_empty() {
             return false;
         }
-        let ends_with_semicolon = trimmed.ends_with(';');
-        let ends_with_close_brace = trimmed.ends_with('}');
 
-        brace_depth == 0 && (ends_with_semicolon || ends_with_close_brace)
+        // Consider input complete as long as we're not inside a string and braces are balanced.
+        true
     }
 
     // History: simple in-memory vector
@@ -365,16 +365,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         history_pos = None;
 
-        // If the input didn't end with a semicolon but looks like a standalone expression, add one
-        let program_str = if trimmed.ends_with(';')
-            || trimmed.starts_with("fn")
-            || trimmed.starts_with("let")
-            || trimmed.starts_with("return")
-        {
-            input_line.clone()
-        } else {
-            format!("{};", input_line)
-        };
+        // Previously we auto-appended a semicolon to standalone expressions.
+        // Semicolons are now optional in the grammar/REPL — pass the input through as-is.
+        let program_str = input_line.clone();
 
         match parse_program(&program_str) {
             Ok(program) => {
