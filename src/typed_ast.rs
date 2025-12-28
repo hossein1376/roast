@@ -168,6 +168,14 @@ pub struct TypeError {
     pub msg: String,
 }
 
+impl std::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Type error: {}", self.msg)
+    }
+}
+
+impl std::error::Error for TypeError {}
+
 #[derive(Debug)]
 pub struct TypedProgram {
     pub statements: Vec<TypedStatement>,
@@ -344,16 +352,19 @@ pub fn analyse_expression(
     }
 }
 
-fn parse_type(type_str: &str) -> Type {
+fn parse_type(type_str: &str) -> Result<Type, TypeError> {
     match type_str {
-        "i32" => Type::I32,
-        "i64" => Type::I64,
-        "f32" => Type::F32,
-        "f64" => Type::F64,
-        "bool" => Type::Bool,
-        "string" => Type::String,
-        "()" => Type::Unit,
-        _ => panic!("Unknown type: {}", type_str),
+        "i32" => Ok(Type::I32),
+        "i64" => Ok(Type::I64),
+        "f32" => Ok(Type::F32),
+        "f64" => Ok(Type::F64),
+        "bool" => Ok(Type::Bool),
+        // accept common aliases produced by the grammar
+        "String" | "string" | "str" => Ok(Type::String),
+        "()" => Ok(Type::Unit),
+        other => Err(TypeError {
+            msg: format!("Unknown type: {}", other),
+        }),
     }
 }
 
@@ -390,7 +401,12 @@ fn analyse_statement(
             type_annotation,
             value,
         } => {
-            let expected_type = type_annotation.as_ref().map(|t| parse_type(t));
+            // Parse the optional type annotation (now returns Result)
+            let expected_type = if let Some(t) = type_annotation.as_ref() {
+                Some(parse_type(t)?)
+            } else {
+                None
+            };
 
             // Analyze the value expression with context
             let typed_value = if let Some(expected) = &expected_type {
@@ -465,16 +481,17 @@ fn analyse_statement(
             return_type,
             body,
         } => {
-            // Build function type
-            let param_types: Vec<Type> = parameters
-                .iter()
-                .map(|p| parse_type(&p.type_annotation))
-                .collect();
+            // Build function type (parse parameter types, propagate errors)
+            let mut param_types: Vec<Type> = Vec::new();
+            for p in &parameters {
+                param_types.push(parse_type(&p.type_annotation)?);
+            }
 
-            let ret_type = return_type
-                .as_ref()
-                .map(|t| parse_type(t))
-                .unwrap_or(Type::Unit);
+            let ret_type = if let Some(t) = return_type.as_ref() {
+                parse_type(t)?
+            } else {
+                Type::Unit
+            };
 
             let func_type = Type::Function {
                 param_types: param_types.clone(),
@@ -498,7 +515,7 @@ fn analyse_statement(
                 symbols.insert(
                     param.name.clone(),
                     Symbol {
-                        symbol_type: parse_type(&param.type_annotation),
+                        symbol_type: parse_type(&param.type_annotation)?,
                         mutable: false,
                     },
                 )?;
@@ -556,13 +573,26 @@ fn analyse_expression_with_hint(
     match expr {
         Expression::IntegerLiteral(i) => {
             // Use the hint to determine integer type
+            // Standardize default integer type to I64
             let expr_type = match hint {
                 Type::I32 => Type::I32,
                 Type::I64 => Type::I64,
-                _ => Type::I32, // Default
+                _ => Type::I64, // Default
             };
             Ok(TypedExpression::IntegerLiteral {
                 value: i,
+                expr_type,
+            })
+        }
+        Expression::FloatLiteral(f) => {
+            // Use the hint to determine float type; default to F64
+            let expr_type = match hint {
+                Type::F32 => Type::F32,
+                Type::F64 => Type::F64,
+                _ => Type::F64, // Default
+            };
+            Ok(TypedExpression::FloatLiteral {
+                value: f,
                 expr_type,
             })
         }

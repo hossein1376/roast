@@ -4,10 +4,10 @@ program = { SOI ~ statement* ~ EOI }
 
 statement = {
     let_statement
-    | assignment_statement
-    | function_declaration
-    | return_statement
-    | expression_statement
+  | assignment_statement
+  | function_declaration
+  | return_statement
+  | expression_statement
 }
 
 // Variable declarations
@@ -57,12 +57,12 @@ unary_op = { "-" | "!" }
 
 primary = {
     function_call
-    | identifier
-    | integer_literal
-    | float_literal
-    | boolean_literal
-    | string_literal
-    | "(" ~ expression ~ ")"
+  | identifier
+  | float_literal
+  | integer_literal
+  | boolean_literal
+  | string_literal
+  | "(" ~ expression ~ ")"
 }
 
 function_call = { identifier ~ "(" ~ argument_list? ~ ")" }

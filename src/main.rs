@@ -639,11 +639,27 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
         }
         (Value::I64(l), BinaryOperator::Modulo, Value::I64(r)) => Ok(Value::I64(l % r)),
 
+        // Float arithmetic (F32)
+        (Value::F32(l), BinaryOperator::Add, Value::F32(r)) => Ok(Value::F32(l + r)),
+        (Value::F32(l), BinaryOperator::Subtract, Value::F32(r)) => Ok(Value::F32(l - r)),
+        (Value::F32(l), BinaryOperator::Multiply, Value::F32(r)) => Ok(Value::F32(l * r)),
+        (Value::F32(l), BinaryOperator::Divide, Value::F32(r)) => Ok(Value::F32(l / r)),
+
         // Float arithmetic (F64)
         (Value::F64(l), BinaryOperator::Add, Value::F64(r)) => Ok(Value::F64(l + r)),
         (Value::F64(l), BinaryOperator::Subtract, Value::F64(r)) => Ok(Value::F64(l - r)),
         (Value::F64(l), BinaryOperator::Multiply, Value::F64(r)) => Ok(Value::F64(l * r)),
         (Value::F64(l), BinaryOperator::Divide, Value::F64(r)) => Ok(Value::F64(l / r)),
+
+        // Comparisons (F32)
+        (Value::F32(l), BinaryOperator::Equal, Value::F32(r)) => Ok(Value::Bool(l == r)),
+        (Value::F32(l), BinaryOperator::NotEqual, Value::F32(r)) => Ok(Value::Bool(l != r)),
+        (Value::F32(l), BinaryOperator::LessThan, Value::F32(r)) => Ok(Value::Bool(l < r)),
+        (Value::F32(l), BinaryOperator::LessThanOrEqual, Value::F32(r)) => Ok(Value::Bool(l <= r)),
+        (Value::F32(l), BinaryOperator::GreaterThan, Value::F32(r)) => Ok(Value::Bool(l > r)),
+        (Value::F32(l), BinaryOperator::GreaterThanOrEqual, Value::F32(r)) => {
+            Ok(Value::Bool(l >= r))
+        }
 
         // String concatenation
         (Value::String(l), BinaryOperator::Add, Value::String(r)) => {
