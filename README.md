@@ -43,7 +43,7 @@ Example REPL session
 > let x: i64 = 10;
 > x
 10
-> fn add(a: i64, b: i64) -> i64 { a + b }
+> func add(a: i64, b: i64) -> i64 { a + b }
 > add(2, 3)
 5
 > :env
@@ -108,7 +108,7 @@ count = count + 1;
 
 Function:
 ```roast/README.md#L31-38
-fn factorial(n: i64) -> i64 {
+func factorial(n: i64) -> i64 {
     if n == 0 {
         return 1
     } else {

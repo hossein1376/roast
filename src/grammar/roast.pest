@@ -21,7 +21,7 @@ return_statement = { "return" ~ expression? ~ ";"? }
 
 // Function declarations
 function_declaration = {
-    "fn" ~ identifier ~ "(" ~ parameter_list? ~ ")" ~ return_type? ~ block
+    "func" ~ identifier ~ "(" ~ parameter_list? ~ ")" ~ return_type? ~ block
 }
 
 parameter_list = { parameter ~ ("," ~ parameter)* }
@@ -56,7 +56,7 @@ unary = { unary_op? ~ primary }
 unary_op = { "-" | "!" }
 
 primary = {
-  
+    function_call
   | identifier
   | float_literal
   | integer_literal
