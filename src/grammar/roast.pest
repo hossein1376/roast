@@ -7,6 +7,8 @@ statement = {
   | assignment_statement
   | function_declaration
   | return_statement
+  | if_statement
+  | while_statement
   | expression_statement
 }
 
@@ -18,6 +20,10 @@ mutability = { "mut" }
 assignment_statement = { identifier ~ "=" ~ expression ~ ";"? }
 
 return_statement = { "return" ~ expression? ~ ";"? }
+
+if_statement = { "if" ~ expression ~ block ~ ("else" ~ block)? }
+
+while_statement = { "while" ~ expression ~ block }
 
 // Function declarations
 function_declaration = {
@@ -57,10 +63,10 @@ unary_op = { "-" | "!" }
 
 primary = {
     function_call
+  | boolean_literal
   | identifier
   | float_literal
   | integer_literal
-  | boolean_literal
   | string_literal
   | "(" ~ expression ~ ")"
 }

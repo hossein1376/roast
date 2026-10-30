@@ -33,6 +33,8 @@ fn build_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::error::Er
         Rule::assignment_statement => build_assignment_statement(inner),
         Rule::function_declaration => build_function_declaration(inner),
         Rule::return_statement => build_return_statement(inner),
+        Rule::if_statement => build_if_statement(inner),
+        Rule::while_statement => build_while_statement(inner),
         Rule::expression_statement => {
             let expr = build_expression(inner.into_inner().next().unwrap())?;
             Ok(Statement::Expression(expr))
@@ -144,6 +146,31 @@ fn build_return_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::er
     }
 
     Ok(Statement::Return { value })
+}
+
+fn build_if_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::error::Error>> {
+    let mut inner = pair.into_inner();
+    let condition = build_expression(inner.next().unwrap())?;
+    let then_branch = build_block(inner.next().unwrap())?;
+    let else_branch = if let Some(else_block) = inner.next() {
+        Some(build_block(else_block)?)
+    } else {
+        None
+    };
+
+    Ok(Statement::If {
+        condition,
+        then_branch,
+        else_branch,
+    })
+}
+
+fn build_while_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::error::Error>> {
+    let mut inner = pair.into_inner();
+    let condition = build_expression(inner.next().unwrap())?;
+    let body = build_block(inner.next().unwrap())?;
+
+    Ok(Statement::While { condition, body })
 }
 
 fn build_expression(pair: Pair<Rule>) -> Result<Expression, Box<dyn std::error::Error>> {
@@ -260,4 +287,35 @@ fn build_function_call(pair: Pair<Rule>) -> Result<Expression, Box<dyn std::erro
     }
 
     Ok(Expression::FunctionCall { name, arguments })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_if_else_and_while() {
+        let program = parse_program(
+            r#"
+            if true {
+                return 1
+            } else {
+                return 2
+            }
+            while false {
+                return 0
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            program.statements[0],
+            Statement::If {
+                else_branch: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(program.statements[1], Statement::While { .. }));
+    }
 }

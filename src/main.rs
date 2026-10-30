@@ -9,6 +9,81 @@ mod parser;
 mod typed_ast;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    if let Some(path) = args.next() {
+        if args.next().is_some() {
+            eprintln!("usage: roast [file]");
+            std::process::exit(1);
+        }
+        return run_file(&path);
+    }
+    repl()
+}
+
+fn run_file(path: &str) -> Result<(), Box<dyn Error>> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("{path}: {err}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(err) = execute_source(&source) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Type-check and run one REPL input.
+///
+/// A type error leaves the previous REPL state unchanged. A runtime error
+/// keeps earlier statements from that input and drops the failed one and
+/// anything after it.
+fn execute_repl_program(
+    repl: &mut Repl,
+    env: &mut Environment,
+    program: Program,
+) -> Result<Vec<Value>, Box<dyn Error>> {
+    let source_statements = program.statements.clone();
+    let saved = repl.symbols.clone();
+    let typed = repl.feed_program(program)?;
+    let mut values = Vec::new();
+    for (index, stmt) in typed.statements.iter().enumerate() {
+        match exec_statement(stmt, env) {
+            Ok(Flow::Value(value) | Flow::Return(value)) => values.push(value),
+            Ok(Flow::Next) => {}
+            Err(err) => {
+                repl.symbols = saved.clone();
+                if let Err(type_err) = repl.replay(&source_statements[..index]) {
+                    repl.symbols = saved;
+                    return Err(type_err.into());
+                }
+                return Err(err.into());
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// Parse, type-check, and run a program. The result is the last expression
+/// value, or `Unit` when the program does not end in one.
+pub fn execute_source(source: &str) -> Result<Value, Box<dyn Error>> {
+    let program = parse_program(source)?;
+    let mut repl_state = Repl::new();
+    let typed = repl_state.feed_program(program)?;
+    let mut env = Environment::new();
+    let mut last = Value::Unit;
+    for stmt in &typed.statements {
+        last = match exec_statement(stmt, &mut env)? {
+            Flow::Value(value) | Flow::Return(value) => value,
+            Flow::Next => Value::Unit,
+        };
+    }
+    Ok(last)
+}
+
+fn repl() -> Result<(), Box<dyn Error>> {
     use std::io::{self, Write};
 
     // REPL keeps a persistent type symbol table and runtime environment.
@@ -27,6 +102,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     use std::time::Duration;
 
     enable_raw_mode()?;
+    // If evaluation panics, raw mode is still cleared.
+    struct RawModeGuard;
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+    let _raw_mode = RawModeGuard;
 
     // Helper to print multi-line output safely by temporarily disabling raw mode.
     // This clears the current line and moves the cursor to column 0 before printing
@@ -370,33 +453,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         let program_str = input_line.clone();
 
         match parse_program(&program_str) {
-            Ok(program) => {
-                match repl.feed_program(program) {
-                    Ok(typed_prog) => {
-                        // Execute typed statements using the persistent environment.
-                        for stmt in &typed_prog.statements {
-                            match exec_statement(stmt, &mut env) {
-                                Ok(Some(val)) => {
-                                    if let Err(err) = print_safe(&format!("{:?}", val)) {
-                                        eprintln!("Printing error: {}", err);
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    if let Err(err) = print_safe(&format!("Runtime error: {}", e)) {
-                                        eprintln!("Printing error: {}", err);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if let Err(err) = print_safe(&format!("Type error: {}", e.msg)) {
+            Ok(program) => match execute_repl_program(&mut repl, &mut env, program) {
+                Ok(values) => {
+                    for val in values {
+                        if let Err(err) = print_safe(&format!("{:?}", val)) {
                             eprintln!("Printing error: {}", err);
                         }
                     }
                 }
-            }
+                Err(err) => {
+                    if let Err(print_err) = print_safe(&err.to_string()) {
+                        eprintln!("Printing error: {}", print_err);
+                    }
+                }
+            },
             Err(e) => {
                 if let Err(err) = print_safe(&format!("Parse error: {}", e)) {
                     eprintln!("Printing error: {}", err);
@@ -409,7 +479,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Flow {
+    /// Statement finished. Keep going.
+    Next,
+    /// Expression statement. The REPL prints it. A block does not return it
+    /// unless it is the block's trailing value.
+    Value(Value),
+    /// A `return` statement. Blocks, `if`, and `while` propagate it.
+    Return(Value),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     I32(i32),
     I64(i64),
@@ -440,7 +521,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Environment {
     scopes: Vec<HashMap<String, Value>>,
 }
@@ -509,7 +590,9 @@ pub fn eval_expression(
 ) -> Result<Value, RuntimeError> {
     match expr {
         TypedExpression::IntegerLiteral { value, expr_type } => match expr_type {
-            Type::I32 => Ok(Value::I32(*value as i32)),
+            Type::I32 => i32::try_from(*value).map(Value::I32).map_err(|_| RuntimeError {
+                msg: format!("integer literal {value} does not fit in i32"),
+            }),
             Type::I64 => Ok(Value::I64(*value)),
             _ => Err(RuntimeError {
                 msg: format!("Invalid integer type: {:?}", expr_type),
@@ -551,98 +634,140 @@ pub fn eval_expression(
         TypedExpression::FunctionCall {
             name, arguments, ..
         } => {
-            // Get the function
-            let func_val = env.get(name)?;
-
-            match func_val {
-                Value::Function {
-                    params,
-                    body,
-                    closure,
-                } => {
-                    // Evaluate arguments
-                    let mut arg_values = Vec::new();
-                    for arg in arguments {
-                        arg_values.push(eval_expression(arg, env)?);
-                    }
-
-                    // Check argument count
-                    if arg_values.len() != params.len() {
-                        return Err(RuntimeError {
-                            msg: format!(
-                                "Function '{}' expects {} arguments, got {}",
-                                name,
-                                params.len(),
-                                arg_values.len()
-                            ),
-                        });
-                    }
-
-                    // Create new environment with closure
-                    let mut call_env = closure;
-                    call_env.push_scope();
-
-                    // Bind parameters
-                    for (param, value) in params.iter().zip(arg_values) {
-                        call_env.define(param.name.clone(), value);
-                    }
-
-                    // Execute function body
-                    let result = eval_block(&body, &mut call_env)?;
-
-                    call_env.pop_scope();
-
-                    Ok(result)
+            if name == "print" {
+                if arguments.len() != 1 {
+                    return Err(RuntimeError {
+                        msg: format!("print expects 1 argument, got {}", arguments.len()),
+                    });
                 }
-                _ => Err(RuntimeError {
-                    msg: format!("'{}' is not a function", name),
-                }),
+                let value = eval_expression(&arguments[0], env)?;
+                println!("{value:?}");
+                return Ok(Value::Unit);
             }
+
+            let func_val = env.get(name)?;
+            let Value::Function {
+                params,
+                body,
+                closure,
+            } = &func_val
+            else {
+                return Err(RuntimeError {
+                    msg: format!("'{}' is not a function", name),
+                });
+            };
+
+            let mut arg_values = Vec::new();
+            for arg in arguments {
+                arg_values.push(eval_expression(arg, env)?);
+            }
+
+            if arg_values.len() != params.len() {
+                return Err(RuntimeError {
+                    msg: format!(
+                        "Function '{}' expects {} arguments, got {}",
+                        name,
+                        params.len(),
+                        arg_values.len()
+                    ),
+                });
+            }
+
+            // Bind the callee in the call scope so direct recursion resolves.
+            // The closure stays the snapshot from definition time.
+            let mut call_env = closure.clone();
+            call_env.push_scope();
+            call_env.define(name.clone(), func_val.clone());
+
+            for (param, value) in params.iter().zip(arg_values) {
+                call_env.define(param.name.clone(), value);
+            }
+
+            let result = match eval_block(body, &mut call_env)? {
+                Flow::Return(value) | Flow::Value(value) => value,
+                Flow::Next => Value::Unit,
+            };
+            Ok(result)
         }
     }
 }
 
+fn int_arith_msg(op: &BinaryOperator, rhs_is_zero: bool) -> String {
+    match op {
+        BinaryOperator::Divide if rhs_is_zero => "Division by zero".to_string(),
+        BinaryOperator::Modulo if rhs_is_zero => "Modulo by zero".to_string(),
+        _ => "Integer overflow".to_string(),
+    }
+}
+
+fn checked_i32(left: i32, op: &BinaryOperator, right: i32) -> Result<i32, RuntimeError> {
+    let value = match op {
+        BinaryOperator::Add => left.checked_add(right),
+        BinaryOperator::Subtract => left.checked_sub(right),
+        BinaryOperator::Multiply => left.checked_mul(right),
+        BinaryOperator::Divide => left.checked_div(right),
+        BinaryOperator::Modulo => left.checked_rem(right),
+        _ => None,
+    };
+    value.ok_or_else(|| RuntimeError {
+        msg: int_arith_msg(op, right == 0),
+    })
+}
+
+fn checked_i64(left: i64, op: &BinaryOperator, right: i64) -> Result<i64, RuntimeError> {
+    let value = match op {
+        BinaryOperator::Add => left.checked_add(right),
+        BinaryOperator::Subtract => left.checked_sub(right),
+        BinaryOperator::Multiply => left.checked_mul(right),
+        BinaryOperator::Divide => left.checked_div(right),
+        BinaryOperator::Modulo => left.checked_rem(right),
+        _ => None,
+    };
+    value.ok_or_else(|| RuntimeError {
+        msg: int_arith_msg(op, right == 0),
+    })
+}
+
 fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Value, RuntimeError> {
     match (left, op, right) {
-        // Integer arithmetic (I32)
-        (Value::I32(l), BinaryOperator::Add, Value::I32(r)) => Ok(Value::I32(l + r)),
-        (Value::I32(l), BinaryOperator::Subtract, Value::I32(r)) => Ok(Value::I32(l - r)),
-        (Value::I32(l), BinaryOperator::Multiply, Value::I32(r)) => Ok(Value::I32(l * r)),
-        (Value::I32(l), BinaryOperator::Divide, Value::I32(r)) => {
-            if *r == 0 {
-                return Err(RuntimeError {
-                    msg: "Division by zero".to_string(),
-                });
-            }
-            Ok(Value::I32(l / r))
+        (Value::I32(l), op, Value::I32(r))
+            if matches!(
+                op,
+                BinaryOperator::Add
+                    | BinaryOperator::Subtract
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo
+            ) =>
+        {
+            Ok(Value::I32(checked_i32(*l, op, *r)?))
         }
-        (Value::I32(l), BinaryOperator::Modulo, Value::I32(r)) => Ok(Value::I32(l % r)),
-
-        // Integer arithmetic (I64)
-        (Value::I64(l), BinaryOperator::Add, Value::I64(r)) => Ok(Value::I64(l + r)),
-        (Value::I64(l), BinaryOperator::Subtract, Value::I64(r)) => Ok(Value::I64(l - r)),
-        (Value::I64(l), BinaryOperator::Multiply, Value::I64(r)) => Ok(Value::I64(l * r)),
-        (Value::I64(l), BinaryOperator::Divide, Value::I64(r)) => {
-            if *r == 0 {
-                return Err(RuntimeError {
-                    msg: "Division by zero".to_string(),
-                });
-            }
-            Ok(Value::I64(l / r))
+        (Value::I64(l), op, Value::I64(r))
+            if matches!(
+                op,
+                BinaryOperator::Add
+                    | BinaryOperator::Subtract
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo
+            ) =>
+        {
+            Ok(Value::I64(checked_i64(*l, op, *r)?))
         }
-        (Value::I64(l), BinaryOperator::Modulo, Value::I64(r)) => Ok(Value::I64(l % r)),
 
         // Float arithmetic (F32)
         (Value::F32(l), BinaryOperator::Add, Value::F32(r)) => Ok(Value::F32(l + r)),
         (Value::F32(l), BinaryOperator::Subtract, Value::F32(r)) => Ok(Value::F32(l - r)),
         (Value::F32(l), BinaryOperator::Multiply, Value::F32(r)) => Ok(Value::F32(l * r)),
         (Value::F32(l), BinaryOperator::Divide, Value::F32(r)) => Ok(Value::F32(l / r)),
+        (Value::F32(l), BinaryOperator::Modulo, Value::F32(r)) => Ok(Value::F32(l % r)),
 
         // Float arithmetic (F64)
         (Value::F64(l), BinaryOperator::Add, Value::F64(r)) => Ok(Value::F64(l + r)),
         (Value::F64(l), BinaryOperator::Subtract, Value::F64(r)) => Ok(Value::F64(l - r)),
         (Value::F64(l), BinaryOperator::Multiply, Value::F64(r)) => Ok(Value::F64(l * r)),
         (Value::F64(l), BinaryOperator::Divide, Value::F64(r)) => Ok(Value::F64(l / r)),
+        (Value::F64(l), BinaryOperator::Modulo, Value::F64(r)) => Ok(Value::F64(l % r)),
 
         // Comparisons (F32)
         (Value::F32(l), BinaryOperator::Equal, Value::F32(r)) => Ok(Value::Bool(l == r)),
@@ -651,6 +776,15 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
         (Value::F32(l), BinaryOperator::LessThanOrEqual, Value::F32(r)) => Ok(Value::Bool(l <= r)),
         (Value::F32(l), BinaryOperator::GreaterThan, Value::F32(r)) => Ok(Value::Bool(l > r)),
         (Value::F32(l), BinaryOperator::GreaterThanOrEqual, Value::F32(r)) => {
+            Ok(Value::Bool(l >= r))
+        }
+
+        (Value::F64(l), BinaryOperator::Equal, Value::F64(r)) => Ok(Value::Bool(l == r)),
+        (Value::F64(l), BinaryOperator::NotEqual, Value::F64(r)) => Ok(Value::Bool(l != r)),
+        (Value::F64(l), BinaryOperator::LessThan, Value::F64(r)) => Ok(Value::Bool(l < r)),
+        (Value::F64(l), BinaryOperator::LessThanOrEqual, Value::F64(r)) => Ok(Value::Bool(l <= r)),
+        (Value::F64(l), BinaryOperator::GreaterThan, Value::F64(r)) => Ok(Value::Bool(l > r)),
+        (Value::F64(l), BinaryOperator::GreaterThanOrEqual, Value::F64(r)) => {
             Ok(Value::Bool(l >= r))
         }
 
@@ -695,8 +829,16 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
 
 fn eval_unary_op(op: &UnaryOperator, operand: &Value) -> Result<Value, RuntimeError> {
     match (op, operand) {
-        (UnaryOperator::Negate, Value::I32(v)) => Ok(Value::I32(-v)),
-        (UnaryOperator::Negate, Value::I64(v)) => Ok(Value::I64(-v)),
+        (UnaryOperator::Negate, Value::I32(v)) => v.checked_neg().map(Value::I32).ok_or_else(|| {
+            RuntimeError {
+                msg: "Integer overflow".to_string(),
+            }
+        }),
+        (UnaryOperator::Negate, Value::I64(v)) => v.checked_neg().map(Value::I64).ok_or_else(|| {
+            RuntimeError {
+                msg: "Integer overflow".to_string(),
+            }
+        }),
         (UnaryOperator::Negate, Value::F32(v)) => Ok(Value::F32(-v)),
         (UnaryOperator::Negate, Value::F64(v)) => Ok(Value::F64(-v)),
         (UnaryOperator::Not, Value::Bool(v)) => Ok(Value::Bool(!v)),
@@ -709,18 +851,18 @@ fn eval_unary_op(op: &UnaryOperator, operand: &Value) -> Result<Value, RuntimeEr
 pub fn exec_statement(
     stmt: &TypedStatement,
     env: &mut Environment,
-) -> Result<Option<Value>, RuntimeError> {
+) -> Result<Flow, RuntimeError> {
     match stmt {
         TypedStatement::Let { name, value, .. } => {
             let val = eval_expression(value, env)?;
             env.define(name.clone(), val);
-            Ok(None)
+            Ok(Flow::Next)
         }
 
         TypedStatement::Assignment { name, value } => {
             let val = eval_expression(value, env)?;
             env.set(name, val)?;
-            Ok(None)
+            Ok(Flow::Next)
         }
 
         TypedStatement::FunctionDeclaration {
@@ -735,7 +877,7 @@ pub fn exec_statement(
                 closure: env.clone(),
             };
             env.define(name.clone(), func);
-            Ok(None)
+            Ok(Flow::Next)
         }
 
         TypedStatement::Return { value } => {
@@ -744,31 +886,75 @@ pub fn exec_statement(
             } else {
                 Value::Unit
             };
-            Ok(Some(val))
+            Ok(Flow::Return(val))
         }
 
+        TypedStatement::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let branch = match eval_expression(condition, env)? {
+                Value::Bool(true) => Some(then_branch),
+                Value::Bool(false) => else_branch.as_ref(),
+                other => {
+                    return Err(RuntimeError {
+                        msg: format!("if condition must be bool, got {:?}", other),
+                    });
+                }
+            };
+            if let Some(branch) = branch {
+                if let Flow::Return(value) = eval_in_scope(branch, env)? {
+                    return Ok(Flow::Return(value));
+                }
+            }
+            Ok(Flow::Next)
+        }
+
+        TypedStatement::While { condition, body } => loop {
+            match eval_expression(condition, env)? {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Ok(Flow::Next),
+                other => {
+                    return Err(RuntimeError {
+                        msg: format!("while condition must be bool, got {:?}", other),
+                    });
+                }
+            }
+            if let Flow::Return(value) = eval_in_scope(body, env)? {
+                return Ok(Flow::Return(value));
+            }
+        },
+
         TypedStatement::Expression(expr) => {
-            // For expression statements return the evaluated value so the REPL can print it.
+            // The REPL prints this. Inside a block it is a value only when
+            // it is the final statement.
             let v = eval_expression(expr, env)?;
-            Ok(Some(v))
+            Ok(Flow::Value(v))
         }
     }
 }
 
-pub fn eval_block(block: &TypedBlock, env: &mut Environment) -> Result<Value, RuntimeError> {
-    // Execute all statements
+fn eval_in_scope(block: &TypedBlock, env: &mut Environment) -> Result<Flow, RuntimeError> {
+    env.push_scope();
+    let result = eval_block(block, env);
+    env.pop_scope();
+    result
+}
+
+pub fn eval_block(block: &TypedBlock, env: &mut Environment) -> Result<Flow, RuntimeError> {
+    let mut last = Flow::Next;
     for stmt in &block.statements {
-        if let Some(return_val) = exec_statement(stmt, env)? {
-            return Ok(return_val);
+        match exec_statement(stmt, env)? {
+            Flow::Return(value) => return Ok(Flow::Return(value)),
+            flow @ (Flow::Next | Flow::Value(_)) => last = flow,
         }
     }
 
-    // Evaluate return expression if present
     if let Some(expr) = &block.return_expression {
-        eval_expression(expr, env)
-    } else {
-        Ok(Value::Unit)
+        return Ok(Flow::Value(eval_expression(expr, env)?));
     }
+    Ok(last)
 }
 
 pub fn execute_program(program: &TypedProgram) -> Result<(), RuntimeError> {
@@ -781,4 +967,155 @@ pub fn execute_program(program: &TypedProgram) -> Result<(), RuntimeError> {
     println!("{:#?}", env);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_program;
+
+    #[test]
+    fn factorial_matches_readme() {
+        let value = execute_source(
+            r#"
+            func factorial(n: i64) -> i64 {
+                if n == 0 {
+                    return 1
+                } else {
+                    return n * factorial(n - 1)
+                }
+            }
+            factorial(5)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(120));
+    }
+
+    #[test]
+    fn trailing_expression_is_function_value() {
+        let value = execute_source(
+            r#"
+            func add(a: i64, b: i64) -> i64 { a + b }
+            add(2, 3)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(5));
+    }
+
+    #[test]
+    fn if_assignment_does_not_return() {
+        let value = execute_source(
+            r#"
+            func f() -> i64 {
+                let mut x: i64 = 0
+                if true {
+                    x = 1
+                } else {
+                    x = 2
+                }
+                x
+            }
+            f()
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(1));
+    }
+
+    #[test]
+    fn while_sums_zero_through_four() {
+        let value = execute_source(
+            r#"
+            let mut i: i64 = 0
+            let mut s: i64 = 0
+            while i < 5 {
+                s = s + i
+                i = i + 1
+            }
+            s
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(10));
+    }
+
+    #[test]
+    fn print_returns_unit() {
+        let value = execute_source("print(1)").unwrap();
+        assert_eq!(value, Value::Unit);
+    }
+
+    #[test]
+    fn f64_comparison_works() {
+        let value = execute_source("let x: f64 = 1.5\nx < 2.0").unwrap();
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn i32_literal_follows_the_other_operand() {
+        let value = execute_source("let mut x: i32 = 1\nx = x + 1\nx").unwrap();
+        assert_eq!(value, Value::I32(2));
+        let value = execute_source("func inc(n: i32) -> i32 { n + 1 }\ninc(1)").unwrap();
+        assert_eq!(value, Value::I32(2));
+    }
+
+    #[test]
+    fn modulo_by_zero_is_an_error() {
+        let err = execute_source("1 % 0").unwrap_err();
+        assert!(err.to_string().contains("Modulo by zero"), "{err}");
+    }
+
+    #[test]
+    fn integer_overflow_is_an_error() {
+        let err = execute_source("let x: i64 = 9223372036854775807\nx + 1").unwrap_err();
+        assert!(err.to_string().contains("Integer overflow"), "{err}");
+    }
+
+    #[test]
+    fn branch_locals_can_share_a_name() {
+        let value = execute_source(
+            r#"
+            let mut n: i64 = 0
+            if true {
+                let x: i64 = 1
+                n = x
+            } else {
+                let x: i64 = 2
+                n = x
+            }
+            n
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(1));
+    }
+
+    #[test]
+    fn runtime_error_keeps_earlier_statements_only() {
+        let mut repl_state = Repl::new();
+        let mut env = Environment::new();
+        let program = parse_program("let x: i64 = 1\nlet y: i64 = 1 / 0\nlet z: i64 = 3").unwrap();
+        assert!(execute_repl_program(&mut repl_state, &mut env, program).is_err());
+        assert!(repl_state.symbols.lookup("x").is_ok());
+        assert!(repl_state.symbols.lookup("y").is_err());
+        assert!(repl_state.symbols.lookup("z").is_err());
+        assert_eq!(env.get("x").unwrap(), Value::I64(1));
+        assert!(env.get("y").is_err());
+    }
+
+    #[test]
+    fn type_error_rolls_back_the_whole_input() {
+        let mut repl_state = Repl::new();
+        let mut env = Environment::new();
+        let first = parse_program("let x: i64 = 4").unwrap();
+        execute_repl_program(&mut repl_state, &mut env, first).unwrap();
+        let bad = parse_program("let y: i64 = true\nlet z: i64 = 5").unwrap();
+        assert!(execute_repl_program(&mut repl_state, &mut env, bad).is_err());
+        assert!(repl_state.symbols.lookup("x").is_ok());
+        assert!(repl_state.symbols.lookup("y").is_err());
+        assert!(repl_state.symbols.lookup("z").is_err());
+        assert_eq!(env.get("x").unwrap(), Value::I64(4));
+    }
 }

@@ -24,6 +24,15 @@ pub enum Statement {
     Return {
         value: Option<Expression>,
     },
+    If {
+        condition: Expression,
+        then_branch: Block,
+        else_branch: Option<Block>,
+    },
+    While {
+        condition: Expression,
+        body: Block,
+    },
     Expression(Expression),
 }
 
