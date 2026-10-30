@@ -9,6 +9,8 @@ statement = {
   | return_statement
   | if_statement
   | while_statement
+  | break_statement
+  | continue_statement
   | expression_statement
 }
 
@@ -21,9 +23,13 @@ assignment_statement = { identifier ~ "=" ~ expression ~ ";"? }
 
 return_statement = { "return" ~ expression? ~ ";"? }
 
-if_statement = { "if" ~ expression ~ block ~ ("else" ~ block)? }
+if_statement = { "if" ~ expression ~ block ~ ("else" ~ (if_statement | block))? }
 
 while_statement = { "while" ~ expression ~ block }
+
+break_statement = { "break" ~ ";"? }
+
+continue_statement = { "continue" ~ ";"? }
 
 // Function declarations
 function_declaration = {

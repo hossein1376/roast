@@ -88,6 +88,8 @@ pub enum TypedStatement {
         condition: TypedExpression,
         body: TypedBlock,
     },
+    Break,
+    Continue,
     Expression(TypedExpression),
 }
 
@@ -780,6 +782,24 @@ fn analyse_statement(
             })
         }
 
+        Statement::Break => {
+            if !in_loop {
+                return Err(TypeError {
+                    msg: "break outside of a loop".to_string(),
+                });
+            }
+            Ok(TypedStatement::Break)
+        }
+
+        Statement::Continue => {
+            if !in_loop {
+                return Err(TypeError {
+                    msg: "continue outside of a loop".to_string(),
+                });
+            }
+            Ok(TypedStatement::Continue)
+        }
+
         Statement::Expression(expr) => {
             let typed_expr = analyse_expression(expr, symbols, expected_return)?;
             Ok(TypedStatement::Expression(typed_expr))
@@ -901,6 +921,12 @@ mod tests {
     fn bool_ordering_is_rejected() {
         let err = analyse("true < false").unwrap_err();
         assert!(err.msg.contains("not supported"), "{}", err.msg);
+    }
+
+    #[test]
+    fn break_outside_loop_is_rejected() {
+        let err = analyse("break").unwrap_err();
+        assert!(err.msg.contains("break"), "{}", err.msg);
     }
 
     #[test]

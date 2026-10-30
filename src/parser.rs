@@ -35,6 +35,8 @@ fn build_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::error::Er
         Rule::return_statement => build_return_statement(inner),
         Rule::if_statement => build_if_statement(inner),
         Rule::while_statement => build_while_statement(inner),
+        Rule::break_statement => Ok(Statement::Break),
+        Rule::continue_statement => Ok(Statement::Continue),
         Rule::expression_statement => {
             let expr = build_expression(inner.into_inner().next().unwrap())?;
             Ok(Statement::Expression(expr))
@@ -152,8 +154,16 @@ fn build_if_statement(pair: Pair<Rule>) -> Result<Statement, Box<dyn std::error:
     let mut inner = pair.into_inner();
     let condition = build_expression(inner.next().unwrap())?;
     let then_branch = build_block(inner.next().unwrap())?;
-    let else_branch = if let Some(else_block) = inner.next() {
-        Some(build_block(else_block)?)
+    let else_branch = if let Some(else_pair) = inner.next() {
+        Some(match else_pair.as_rule() {
+            Rule::block => build_block(else_pair)?,
+            // `else if` is the nested if, wrapped so the else branch stays a block.
+            Rule::if_statement => Block {
+                statements: vec![build_if_statement(else_pair)?],
+                return_expression: None,
+            },
+            other => return Err(format!("Unexpected else clause: {other:?}").into()),
+        })
     } else {
         None
     };

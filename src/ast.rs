@@ -33,6 +33,8 @@ pub enum Statement {
         condition: Expression,
         body: Block,
     },
+    Break,
+    Continue,
     Expression(Expression),
 }
 

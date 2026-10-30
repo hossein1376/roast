@@ -8,6 +8,27 @@ mod ast;
 mod parser;
 mod typed_ast;
 
+/// Print one line. In raw mode `\n` does not return to column 0.
+fn write_stdout_line(text: &str) {
+    use std::io::Write;
+    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+        print!("\r{text}\n\r");
+    } else {
+        println!("{text}");
+    }
+    let _ = std::io::stdout().flush();
+}
+
+fn raw_aware_newline() {
+    use std::io::Write;
+    if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
+        print!("\n\r");
+    } else {
+        println!();
+    }
+    let _ = std::io::stdout().flush();
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     if let Some(path) = args.next() {
@@ -51,8 +72,22 @@ fn execute_repl_program(
     let mut values = Vec::new();
     for (index, stmt) in typed.statements.iter().enumerate() {
         match exec_statement(stmt, env) {
-            Ok(Flow::Value(value) | Flow::Return(value)) => values.push(value),
-            Ok(Flow::Next) => {}
+            Ok(Flow::Value(value) | Flow::Return(value)) if value != Value::Unit => {
+                values.push(value)
+            }
+            Ok(Flow::Value(_) | Flow::Return(_) | Flow::Next) => {}
+            Ok(Flow::Break) => {
+                return Err(RuntimeError {
+                    msg: "break outside of a loop".to_string(),
+                }
+                .into());
+            }
+            Ok(Flow::Continue) => {
+                return Err(RuntimeError {
+                    msg: "continue outside of a loop".to_string(),
+                }
+                .into());
+            }
             Err(err) => {
                 repl.symbols = saved.clone();
                 if let Err(type_err) = repl.replay(&source_statements[..index]) {
@@ -78,6 +113,18 @@ pub fn execute_source(source: &str) -> Result<Value, Box<dyn Error>> {
         last = match exec_statement(stmt, &mut env)? {
             Flow::Value(value) | Flow::Return(value) => value,
             Flow::Next => Value::Unit,
+            Flow::Break => {
+                return Err(RuntimeError {
+                    msg: "break outside of a loop".to_string(),
+                }
+                .into());
+            }
+            Flow::Continue => {
+                return Err(RuntimeError {
+                    msg: "continue outside of a loop".to_string(),
+                }
+                .into());
+            }
         };
     }
     Ok(last)
@@ -357,20 +404,20 @@ fn repl() -> Result<(), Box<dyn Error>> {
                             // If this is a REPL command (starts with ':'), treat it as complete immediately.
                             if candidate.trim_start().starts_with(':') {
                                 full_input = candidate;
-                                println!();
+                                raw_aware_newline();
                                 break;
                             }
 
                             if is_input_complete(&candidate) {
                                 // finalize
                                 full_input = candidate;
-                                println!();
+                                raw_aware_newline();
                                 break;
                             } else {
                                 // continue multi-line input
                                 full_input = candidate;
                                 // append newline to display and clear buffer for next line
-                                print!("\n");
+                                raw_aware_newline();
                                 prompt = "... ".to_string();
                                 buffer.clear();
                                 cursor_pos = 0;
@@ -456,7 +503,7 @@ fn repl() -> Result<(), Box<dyn Error>> {
             Ok(program) => match execute_repl_program(&mut repl, &mut env, program) {
                 Ok(values) => {
                     for val in values {
-                        if let Err(err) = print_safe(&format!("{:?}", val)) {
+                        if let Err(err) = print_safe(&val.to_string()) {
                             eprintln!("Printing error: {}", err);
                         }
                     }
@@ -488,6 +535,10 @@ pub enum Flow {
     Value(Value),
     /// A `return` statement. Blocks, `if`, and `while` propagate it.
     Return(Value),
+    /// Leave the innermost loop.
+    Break,
+    /// Skip the rest of the innermost loop body.
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -504,6 +555,21 @@ pub enum Value {
         body: TypedBlock,
         closure: Environment, // Captured environment
     },
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::I32(v) => write!(f, "{v}"),
+            Value::I64(v) => write!(f, "{v}"),
+            Value::F32(v) => write!(f, "{v}"),
+            Value::F64(v) => write!(f, "{v}"),
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::String(v) => write!(f, "{v}"),
+            Value::Unit => write!(f, "()"),
+            Value::Function { .. } => write!(f, "func"),
+        }
+    }
 }
 
 impl Value {
@@ -641,7 +707,7 @@ pub fn eval_expression(
                     });
                 }
                 let value = eval_expression(&arguments[0], env)?;
-                println!("{value:?}");
+                write_stdout_line(&value.to_string());
                 return Ok(Value::Unit);
             }
 
@@ -686,6 +752,16 @@ pub fn eval_expression(
             let result = match eval_block(body, &mut call_env)? {
                 Flow::Return(value) | Flow::Value(value) => value,
                 Flow::Next => Value::Unit,
+                Flow::Break => {
+                    return Err(RuntimeError {
+                        msg: "break outside of a loop".to_string(),
+                    });
+                }
+                Flow::Continue => {
+                    return Err(RuntimeError {
+                        msg: "continue outside of a loop".to_string(),
+                    });
+                }
             };
             Ok(result)
         }
@@ -904,8 +980,11 @@ pub fn exec_statement(
                 }
             };
             if let Some(branch) = branch {
-                if let Flow::Return(value) = eval_in_scope(branch, env)? {
-                    return Ok(Flow::Return(value));
+                match eval_in_scope(branch, env)? {
+                    Flow::Return(value) => return Ok(Flow::Return(value)),
+                    Flow::Break => return Ok(Flow::Break),
+                    Flow::Continue => return Ok(Flow::Continue),
+                    Flow::Next | Flow::Value(_) => {}
                 }
             }
             Ok(Flow::Next)
@@ -921,10 +1000,17 @@ pub fn exec_statement(
                     });
                 }
             }
-            if let Flow::Return(value) = eval_in_scope(body, env)? {
-                return Ok(Flow::Return(value));
+            match eval_in_scope(body, env)? {
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+                Flow::Break => return Ok(Flow::Next),
+                Flow::Continue => continue,
+                Flow::Next | Flow::Value(_) => {}
             }
         },
+
+        TypedStatement::Break => Ok(Flow::Break),
+
+        TypedStatement::Continue => Ok(Flow::Continue),
 
         TypedStatement::Expression(expr) => {
             // The REPL prints this. Inside a block it is a value only when
@@ -947,6 +1033,8 @@ pub fn eval_block(block: &TypedBlock, env: &mut Environment) -> Result<Flow, Run
     for stmt in &block.statements {
         match exec_statement(stmt, env)? {
             Flow::Return(value) => return Ok(Flow::Return(value)),
+            Flow::Break => return Ok(Flow::Break),
+            Flow::Continue => return Ok(Flow::Continue),
             flow @ (Flow::Next | Flow::Value(_)) => last = flow,
         }
     }
@@ -1045,6 +1133,58 @@ mod tests {
     fn print_returns_unit() {
         let value = execute_source("print(1)").unwrap();
         assert_eq!(value, Value::Unit);
+    }
+
+    #[test]
+    fn values_display_without_type_tags() {
+        assert_eq!(Value::I64(10).to_string(), "10");
+        assert_eq!(Value::Bool(true).to_string(), "true");
+        assert_eq!(Value::String("hi".to_string()).to_string(), "hi");
+    }
+
+    #[test]
+    fn else_if_break_and_continue() {
+        let value = execute_source(
+            r#"
+            func kind(n: i64) -> i64 {
+                if n == 0 {
+                    return 0
+                } else if n == 1 {
+                    return 1
+                } else {
+                    return n
+                }
+            }
+            let mut s: i64 = 0
+            let mut i: i64 = 0
+            while i < 10 {
+                i = i + 1
+                if i == 3 {
+                    continue
+                }
+                if i == 5 {
+                    break
+                }
+                s = s + i
+            }
+            s + kind(1)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(value, Value::I64(8));
+    }
+
+    #[test]
+    fn repl_does_not_echo_unit() {
+        let mut repl_state = Repl::new();
+        let mut env = Environment::new();
+        let printed = parse_program("print(2)").unwrap();
+        let values = execute_repl_program(&mut repl_state, &mut env, printed).unwrap();
+        assert!(values.is_empty());
+
+        let shown = parse_program("2").unwrap();
+        let values = execute_repl_program(&mut repl_state, &mut env, shown).unwrap();
+        assert_eq!(values, vec![Value::I64(2)]);
     }
 
     #[test]
